@@ -3,6 +3,26 @@ from torch import nn
 import torch.nn.functional as F
 from einops import rearrange
 
+
+def prediction_loss(
+    pred,
+    target,
+    *,
+    loss_type="mse",
+    target_detach=False,
+    smooth_l1_beta=1.0,
+):
+    if target_detach:
+        target = target.detach()
+
+    if loss_type == "mse":
+        return F.mse_loss(pred, target)
+    if loss_type == "smooth_l1":
+        return F.smooth_l1_loss(pred, target, beta=smooth_l1_beta)
+
+    raise ValueError(f"Unknown loss_type: {loss_type}")
+
+
 def modulate(x, shift, scale):
     """AdaLN-zero modulation"""
     return x * (1 + scale) + shift
@@ -257,10 +277,21 @@ class ARPredictor(nn.Module):
         dim_head=64,
         dropout=0.0,
         emb_dropout=0.0,
+        conditioning_type="adaln",
     ):
         super().__init__()
+        self.conditioning_type = conditioning_type
         self.pos_embedding = nn.Parameter(torch.randn(1, num_frames, input_dim))
         self.dropout = nn.Dropout(emb_dropout)
+        if conditioning_type == "adaln":
+            self.action_proj = None
+            block_class = ConditionalBlock
+        elif conditioning_type == "add":
+            self.action_proj = nn.Linear(input_dim, input_dim)
+            block_class = Block
+        else:
+            raise ValueError(f"Unknown conditioning_type: {conditioning_type}")
+
         self.transformer = Transformer(
             input_dim,
             hidden_dim,
@@ -270,7 +301,7 @@ class ARPredictor(nn.Module):
             dim_head,
             mlp_dim,
             dropout,
-            block_class=ConditionalBlock,
+            block_class=block_class,
         )
 
     def forward(self, x, c):
@@ -281,5 +312,8 @@ class ARPredictor(nn.Module):
         T = x.size(1)
         x = x + self.pos_embedding[:, :T]
         x = self.dropout(x)
-        x = self.transformer(x, c)
+        if self.conditioning_type == "adaln":
+            x = self.transformer(x, c)
+        else:
+            x = self.transformer(x + self.action_proj(c))
         return x

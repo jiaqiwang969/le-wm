@@ -13,6 +13,15 @@ patch_size: 14
 encoder_scale: tiny
 dump_object: True
 
+warm_start:
+  enabled: false
+  checkpoint: ""
+  strict: true
+
+freeze:
+  enabled: false
+  modules: []
+
 trainer:
   max_epochs: 100
   devices: auto
@@ -55,8 +64,23 @@ predictor:
   dim_head: 64
   dropout: 0.1
   emb_dropout: 0.0
+  conditioning_type: adaln
+
+action_encoder:
+  smoothed_dim: 10
+  mlp_scale: 4
+
+projector:
+  hidden_dim: 2048
+
+predictor_proj:
+  hidden_dim: 2048
 
 loss:
+  pred:
+    type: mse
+    smooth_l1_beta: 1.0
+    target_detach: false
   sigreg:
     weight: 0.09
     kwargs:

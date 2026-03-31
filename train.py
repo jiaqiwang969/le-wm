@@ -10,9 +10,11 @@ import torch
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf, open_dict
 
+from freeze_modules import apply_freeze_configuration
 from jepa import JEPA
-from module import ARPredictor, Embedder, MLP, SIGReg
+from module import ARPredictor, Embedder, MLP, SIGReg, prediction_loss
 from utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBack
+from warm_start import apply_warm_start, resolve_warm_start_checkpoint_path
 
 
 def lejepa_forward(self, batch, stage, cfg):
@@ -37,13 +39,38 @@ def lejepa_forward(self, batch, stage, cfg):
     pred_emb = self.model.predict(ctx_emb, ctx_act) # pred
 
     # LeWM loss
-    output["pred_loss"] = (pred_emb - tgt_emb).pow(2).mean()
+    output["pred_loss"] = prediction_loss(
+        pred_emb,
+        tgt_emb,
+        loss_type=cfg.loss.pred.type,
+        target_detach=cfg.loss.pred.target_detach,
+        smooth_l1_beta=cfg.loss.pred.smooth_l1_beta,
+    )
     output["sigreg_loss"]= self.sigreg(emb.transpose(0, 1))
     output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]  
 
     losses_dict = {f"{stage}/{k}": v.detach() for k, v in output.items() if "loss" in k}
     self.log_dict(losses_dict, on_step=True, sync_dist=True)
     return output
+
+
+def maybe_apply_warm_start(model, cfg, stablewm_home: Path):
+    warm_start_cfg = cfg.get("warm_start")
+    if not warm_start_cfg or not warm_start_cfg.get("enabled", False):
+        return None
+
+    checkpoint_path = resolve_warm_start_checkpoint_path(
+        stablewm_home=stablewm_home,
+        checkpoint=warm_start_cfg.get("checkpoint"),
+    )
+    print(f"Loading warm-start checkpoint from {checkpoint_path}")
+    result = apply_warm_start(
+        model,
+        checkpoint_path,
+        strict=warm_start_cfg.get("strict", True),
+    )
+    print("Warm-start checkpoint loaded")
+    return result
 
 @hydra.main(version_base=None, config_path="./config/train", config_name="lewm")
 def run(cfg):
@@ -99,19 +126,23 @@ def run(cfg):
         **cfg.predictor,
     )
 
-    action_encoder = Embedder(input_dim=effective_act_dim, emb_dim=embed_dim)
+    action_encoder = Embedder(
+        input_dim=effective_act_dim,
+        emb_dim=embed_dim,
+        **cfg.action_encoder,
+    )
     
     projector = MLP(
         input_dim=hidden_dim,
         output_dim=embed_dim,
-        hidden_dim=2048,
+        hidden_dim=cfg.projector.hidden_dim,
         norm_fn=torch.nn.BatchNorm1d,
     )
 
     predictor_proj = MLP(
         input_dim=hidden_dim,
         output_dim=embed_dim,
-        hidden_dim=2048,
+        hidden_dim=cfg.predictor_proj.hidden_dim,
         norm_fn=torch.nn.BatchNorm1d,
     )
 
@@ -122,6 +153,12 @@ def run(cfg):
         projector=projector,
         pred_proj=predictor_proj,
     )
+
+    stablewm_home = Path(swm.data.utils.get_cache_dir())
+    maybe_apply_warm_start(world_model, cfg, stablewm_home=stablewm_home)
+    frozen_modules = apply_freeze_configuration(world_model, cfg.get("freeze"))
+    if frozen_modules:
+        print(f"Frozen modules: {', '.join(frozen_modules)}")
 
     optimizers = {
         'model_opt': {
