@@ -17,6 +17,17 @@ from utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBa
 from warm_start import apply_warm_start, resolve_warm_start_checkpoint_path
 
 
+def prediction_loss_kwargs(cfg):
+    pred_cfg = cfg.loss.pred
+    return {
+        "loss_type": pred_cfg.type,
+        "target_detach": pred_cfg.target_detach,
+        "smooth_l1_beta": pred_cfg.smooth_l1_beta,
+        "mse_weight": pred_cfg.get("mse_weight", 1.0),
+        "cosine_weight": pred_cfg.get("cosine_weight", 0.1),
+    }
+
+
 def lejepa_forward(self, batch, stage, cfg):
     """encode observations, predict next states, compute losses."""
 
@@ -42,9 +53,7 @@ def lejepa_forward(self, batch, stage, cfg):
     output["pred_loss"] = prediction_loss(
         pred_emb,
         tgt_emb,
-        loss_type=cfg.loss.pred.type,
-        target_detach=cfg.loss.pred.target_detach,
-        smooth_l1_beta=cfg.loss.pred.smooth_l1_beta,
+        **prediction_loss_kwargs(cfg),
     )
     output["sigreg_loss"]= self.sigreg(emb.transpose(0, 1))
     output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]  

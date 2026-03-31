@@ -11,6 +11,8 @@ def prediction_loss(
     loss_type="mse",
     target_detach=False,
     smooth_l1_beta=1.0,
+    mse_weight=1.0,
+    cosine_weight=0.1,
 ):
     if target_detach:
         target = target.detach()
@@ -19,6 +21,10 @@ def prediction_loss(
         return F.mse_loss(pred, target)
     if loss_type == "smooth_l1":
         return F.smooth_l1_loss(pred, target, beta=smooth_l1_beta)
+    if loss_type == "mse_cosine":
+        mse = F.mse_loss(pred, target)
+        cosine = 1 - F.cosine_similarity(pred, target, dim=-1).mean()
+        return mse_weight * mse + cosine_weight * cosine
 
     raise ValueError(f"Unknown loss_type: {loss_type}")
 

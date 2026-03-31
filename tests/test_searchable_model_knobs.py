@@ -1,8 +1,10 @@
 import unittest
 
 import torch
+from omegaconf import OmegaConf
 
 from module import ARPredictor, prediction_loss
+from train import prediction_loss_kwargs
 
 
 class SearchableModelKnobsTest(unittest.TestCase):
@@ -38,6 +40,64 @@ class SearchableModelKnobsTest(unittest.TestCase):
         )
 
         self.assertTrue(torch.isclose(loss, torch.tensor(1.0)))
+
+    def test_prediction_loss_supports_mse_cosine(self):
+        pred = torch.tensor([[1.0, 0.0]])
+        target = torch.tensor([[0.0, 1.0]])
+
+        loss = prediction_loss(
+            pred,
+            target,
+            loss_type="mse_cosine",
+            mse_weight=1.0,
+            cosine_weight=0.1,
+        )
+
+        self.assertTrue(torch.isclose(loss, torch.tensor(1.1)))
+
+    def test_prediction_loss_mse_cosine_can_detach_target(self):
+        pred = torch.tensor([[1.0, 0.0]], requires_grad=True)
+        target = torch.tensor([[0.0, 1.0]], requires_grad=True)
+
+        loss = prediction_loss(
+            pred,
+            target,
+            loss_type="mse_cosine",
+            target_detach=True,
+            mse_weight=1.0,
+            cosine_weight=0.1,
+        )
+        loss.backward()
+
+        self.assertIsNone(target.grad)
+
+    def test_prediction_loss_kwargs_reads_cfg_fields(self):
+        cfg = OmegaConf.create(
+            {
+                "loss": {
+                    "pred": {
+                        "type": "mse_cosine",
+                        "target_detach": True,
+                        "smooth_l1_beta": 0.5,
+                        "mse_weight": 1.25,
+                        "cosine_weight": 0.2,
+                    }
+                }
+            }
+        )
+
+        kwargs = prediction_loss_kwargs(cfg)
+
+        self.assertEqual(
+            kwargs,
+            {
+                "loss_type": "mse_cosine",
+                "target_detach": True,
+                "smooth_l1_beta": 0.5,
+                "mse_weight": 1.25,
+                "cosine_weight": 0.2,
+            },
+        )
 
     def test_arpredictor_supports_add_conditioning(self):
         predictor = ARPredictor(
