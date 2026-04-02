@@ -1,2 +1,7 @@
 __pycache__/
 .pytest_cache/
+environment*.json
+requirements_frozen*.txt
+lightning_logs/
+outputs/
+wandb/
