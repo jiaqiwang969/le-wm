@@ -4,7 +4,11 @@ import torch
 from omegaconf import OmegaConf
 
 from module import ARPredictor, prediction_loss
-from train import prediction_loss_kwargs
+from train import (
+    autoregressive_rollout_predictions,
+    prediction_loss_kwargs,
+    teacher_forced_targets,
+)
 
 
 class SearchableModelKnobsTest(unittest.TestCase):
@@ -98,6 +102,40 @@ class SearchableModelKnobsTest(unittest.TestCase):
                 "cosine_weight": 0.2,
             },
         )
+
+    def test_teacher_forced_targets_respect_custom_shift(self):
+        emb = torch.arange(12, dtype=torch.float32).view(1, 6, 2)
+        act_emb = emb + 100
+
+        ctx_emb, ctx_act, tgt_emb = teacher_forced_targets(
+            emb,
+            act_emb,
+            history_size=3,
+            shift=1,
+        )
+
+        self.assertTrue(torch.equal(ctx_emb, emb[:, :3]))
+        self.assertTrue(torch.equal(ctx_act, act_emb[:, :3]))
+        self.assertTrue(torch.equal(tgt_emb, emb[:, 1:4]))
+
+    def test_autoregressive_rollout_predictions_follow_predicted_history(self):
+        class FakeModel:
+            def predict(self, emb, act_emb):
+                return emb + act_emb
+
+        emb = torch.tensor([[[0.0], [1.0], [2.0], [3.0], [4.0]]])
+        act_emb = torch.tensor([[[10.0], [20.0], [30.0], [40.0], [50.0]]])
+
+        preds = autoregressive_rollout_predictions(
+            FakeModel(),
+            emb,
+            act_emb,
+            history_size=3,
+            rollout_steps=2,
+        )
+
+        expected = torch.tensor([[[32.0], [72.0]]])
+        self.assertTrue(torch.equal(preds, expected))
 
     def test_arpredictor_supports_add_conditioning(self):
         predictor = ARPredictor(

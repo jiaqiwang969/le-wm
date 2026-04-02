@@ -12,6 +12,7 @@ img_size: 224
 patch_size: 14
 encoder_scale: tiny
 dump_object: True
+post_fit_validate: true
 
 warm_start:
   enabled: false
@@ -83,6 +84,8 @@ loss:
     target_detach: false
     mse_weight: 1.0
     cosine_weight: 0.1
+    teacher_force_shift: ${wm.num_preds}
+    rollout_weight: 0.0
   sigreg:
     weight: 0.09
     kwargs:

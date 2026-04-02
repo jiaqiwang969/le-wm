@@ -28,12 +28,63 @@ def prediction_loss_kwargs(cfg):
     }
 
 
+def teacher_forced_targets(emb, act_emb, *, history_size, shift):
+    if shift < 1:
+        raise ValueError(f"teacher forcing shift must be >= 1, got {shift}")
+    required_steps = history_size + shift
+    if emb.size(1) < required_steps or act_emb.size(1) < history_size:
+        raise ValueError(
+            f"sequence too short for teacher forcing: need emb >= {required_steps} and act >= {history_size}, "
+            f"got emb={emb.size(1)} act={act_emb.size(1)}"
+        )
+
+    ctx_emb = emb[:, :history_size]
+    ctx_act = act_emb[:, :history_size]
+    tgt_emb = emb[:, shift : shift + history_size]
+    return ctx_emb, ctx_act, tgt_emb
+
+
+def autoregressive_rollout_predictions(model, emb, act_emb, *, history_size, rollout_steps):
+    if rollout_steps < 1:
+        raise ValueError(f"rollout_steps must be >= 1, got {rollout_steps}")
+    if emb.size(1) < history_size:
+        raise ValueError(
+            f"sequence too short for rollout history: need emb >= {history_size}, got emb={emb.size(1)}"
+        )
+    required_actions = history_size + rollout_steps - 1
+    if act_emb.size(1) < required_actions:
+        raise ValueError(
+            f"sequence too short for rollout actions: need act >= {required_actions}, got act={act_emb.size(1)}"
+        )
+
+    hist_emb = emb[:, :history_size]
+    hist_act = act_emb[:, :history_size]
+    preds = []
+
+    for step in range(rollout_steps):
+        next_pred = model.predict(
+            hist_emb[:, -history_size:],
+            hist_act[:, -history_size:],
+        )[:, -1:]
+        preds.append(next_pred)
+        hist_emb = torch.cat([hist_emb, next_pred], dim=1)
+
+        if step + 1 < rollout_steps:
+            next_action = act_emb[:, history_size + step : history_size + step + 1]
+            hist_act = torch.cat([hist_act, next_action], dim=1)
+
+    return torch.cat(preds, dim=1)
+
+
 def lejepa_forward(self, batch, stage, cfg):
     """encode observations, predict next states, compute losses."""
 
     ctx_len = cfg.wm.history_size
-    n_preds = cfg.wm.num_preds
+    rollout_steps = cfg.wm.num_preds
     lambd = cfg.loss.sigreg.weight
+    pred_cfg = cfg.loss.pred
+    teacher_force_shift = pred_cfg.get("teacher_force_shift", rollout_steps)
+    rollout_weight = pred_cfg.get("rollout_weight", 0.0)
 
     # Replace NaN values with 0 (occurs at sequence boundaries)
     batch["action"] = torch.nan_to_num(batch["action"], 0.0)
@@ -43,11 +94,13 @@ def lejepa_forward(self, batch, stage, cfg):
     emb = output["emb"]  # (B, T, D)
     act_emb = output["act_emb"]
 
-    ctx_emb = emb[:, :ctx_len]
-    ctx_act = act_emb[:, : ctx_len]
-
-    tgt_emb = emb[:, n_preds:] # label
-    pred_emb = self.model.predict(ctx_emb, ctx_act) # pred
+    ctx_emb, ctx_act, tgt_emb = teacher_forced_targets(
+        emb,
+        act_emb,
+        history_size=ctx_len,
+        shift=teacher_force_shift,
+    )
+    pred_emb = self.model.predict(ctx_emb, ctx_act)
 
     # LeWM loss
     output["pred_loss"] = prediction_loss(
@@ -55,8 +108,28 @@ def lejepa_forward(self, batch, stage, cfg):
         tgt_emb,
         **prediction_loss_kwargs(cfg),
     )
-    output["sigreg_loss"]= self.sigreg(emb.transpose(0, 1))
-    output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]  
+    output["rollout_loss"] = emb.new_zeros(())
+    if rollout_weight > 0:
+        rollout_pred = autoregressive_rollout_predictions(
+            self.model,
+            emb,
+            act_emb,
+            history_size=ctx_len,
+            rollout_steps=rollout_steps,
+        )
+        rollout_tgt = emb[:, ctx_len : ctx_len + rollout_steps]
+        output["rollout_loss"] = prediction_loss(
+            rollout_pred,
+            rollout_tgt,
+            **prediction_loss_kwargs(cfg),
+        )
+
+    output["sigreg_loss"] = self.sigreg(emb.transpose(0, 1))
+    output["loss"] = (
+        output["pred_loss"]
+        + rollout_weight * output["rollout_loss"]
+        + lambd * output["sigreg_loss"]
+    )
 
     losses_dict = {f"{stage}/{k}": v.detach() for k, v in output.items() if "loss" in k}
     self.log_dict(losses_dict, on_step=True, sync_dist=True)
@@ -222,6 +295,9 @@ def run(cfg):
     )
 
     manager()
+    if cfg.get("post_fit_validate", False):
+        print("Running post-fit validation on final weights")
+        trainer.validate(model=world_model, dataloaders=val, verbose=True)
     return
 
 
