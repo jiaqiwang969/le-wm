@@ -10,6 +10,46 @@ class _ShapeOnly:
 
 
 class WarmStartPartialLoadTest(unittest.TestCase):
+    def test_strict_warm_start_strips_lightning_model_prefix(self):
+        loaded = {}
+
+        class FakeModule:
+            def state_dict(self):
+                return {
+                    "encoder.weight": _ShapeOnly((2, 2)),
+                    "predictor.weight": _ShapeOnly((4, 4)),
+                }
+
+            def load_state_dict(self, state_dict, strict=True):
+                loaded["state_dict"] = state_dict
+                loaded["strict"] = strict
+                return object()
+
+        payload = {
+            "state_dict": {
+                "model.encoder.weight": _ShapeOnly((2, 2)),
+                "model.predictor.weight": _ShapeOnly((4, 4)),
+                "sigreg.t": _ShapeOnly((1,)),
+            }
+        }
+
+        result = warm_start.apply_warm_start(
+            module=FakeModule(),
+            checkpoint_path=Path("/tmp/stablewm/cube/lewm_weights.ckpt"),
+            loader=lambda path, map_location=None, weights_only=None: payload,
+            strict=True,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            loaded["state_dict"],
+            {
+                "encoder.weight": payload["state_dict"]["model.encoder.weight"],
+                "predictor.weight": payload["state_dict"]["model.predictor.weight"],
+            },
+        )
+        self.assertTrue(loaded["strict"])
+
     def test_non_strict_warm_start_loads_only_compatible_keys(self):
         loaded = {}
 

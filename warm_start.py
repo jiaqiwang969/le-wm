@@ -41,6 +41,30 @@ def _shape_tuple(value):
     return None if shape is None else tuple(shape)
 
 
+def align_state_dict_keys(module, state_dict):
+    module_keys = set(module.state_dict().keys())
+    aligned = {}
+
+    # Align each checkpoint key independently so mixed Lightning payloads like
+    # "model.*" + trainer-only "sigreg.*" still load cleanly into the bare model.
+    for original_key, value in state_dict.items():
+        candidate = original_key
+        match = candidate if candidate in module_keys else None
+
+        while match is None and "." in candidate:
+            candidate = candidate.split(".", 1)[1]
+            if candidate in module_keys:
+                match = candidate
+
+        if match is None:
+            continue
+        if match in aligned and original_key != match:
+            continue
+        aligned[match] = value
+
+    return aligned
+
+
 def filter_compatible_state_dict(module, state_dict):
     module_state = module.state_dict()
     compatible = {}
@@ -61,6 +85,7 @@ def apply_warm_start(module, checkpoint_path: Path, loader=None, strict: bool = 
     loader = loader or _default_loader
     payload = loader(Path(checkpoint_path), map_location="cpu", weights_only=True)
     state_dict = extract_state_dict(payload)
+    state_dict = align_state_dict_keys(module, state_dict)
     if not strict:
         state_dict = filter_compatible_state_dict(module, state_dict)
     return module.load_state_dict(state_dict, strict=strict)
